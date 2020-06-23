@@ -6,17 +6,23 @@
 
 from __future__ import absolute_import, division, print_function, unicode_literals
 
-import requests, re, json
 import tensorflow_datasets as tfds
 import tensorflow as tf
 
 import time
 import numpy as np
-import matplotlib.pyplot as plt
 import os
 
 
 # In[2]:
+
+
+BUFFER_SIZE = 20000
+BATCH_SIZE = 64
+MAX_LENGTH = 100
+
+
+# In[3]:
 
 
 def load_data_file():
@@ -34,7 +40,7 @@ def load_data_file():
     return examples
 
 
-# In[3]:
+# In[4]:
 
 
 def train_val(examples,train_size = 128000,
@@ -44,7 +50,7 @@ def train_val(examples,train_size = 128000,
     return train_examples,val_examples
 
 
-# In[4]:
+# In[5]:
 
 
 def create_tokenizer(train_examples):
@@ -83,22 +89,15 @@ def create_zh(train_examples):
     return tokenizer_zh
 
 
-# In[5]:
+# In[6]:
 
 
 def load_tokenizer(path):
     tokenizer_en = tfds.features.text.SubwordTextEncoder.load_from_file(
-        './vocab' + path + '/enVOCAB')
+        path + '/enVOCAB')
     tokenizer_zh = tfds.features.text.SubwordTextEncoder.load_from_file(
-        './vocab' + path + '/zhVOCAB')
+        path + '/zhVOCAB')
     return tokenizer_en, tokenizer_zh
-
-
-# In[6]:
-
-
-BUFFER_SIZE = 20000
-BATCH_SIZE = 64
 
 
 # In[7]:
@@ -117,14 +116,11 @@ def encode(lang1, lang2):
 # In[8]:
 
 
-MAX_LENGTH = 100
-
-
 def filter_max_length(x, y, max_length=MAX_LENGTH):
     return tf.logical_and(tf.size(x) <= max_length, tf.size(y) <= max_length)
 
 
-# In[9]:
+# In[10]:
 
 
 def tf_encode(en, zh):
@@ -136,7 +132,7 @@ def tf_encode(en, zh):
     return result_en, result_zh
 
 
-# In[10]:
+# In[9]:
 
 
 def creat_datasets(train_examples, val_examples,train_size):
@@ -163,7 +159,7 @@ def get_angles(pos, i, d_model):
     return pos * angle_rates
 
 
-# In[12]:
+# In[14]:
 
 
 def positional_encoding(position, d_model):
@@ -193,7 +189,7 @@ def create_padding_mask(seq):
     return seq[:, tf.newaxis, tf.newaxis, :]  # (batch_size, 1, 1, seq_len)
 
 
-# In[14]:
+# In[12]:
 
 
 def create_look_ahead_mask(size):
@@ -243,17 +239,6 @@ def scaled_dot_product_attention(q, k, v, mask):
     return output, attention_weights
 
 
-# In[16]:
-
-
-def print_out(q, k, v):
-    temp_out, temp_attn = scaled_dot_product_attention(q, k, v, None)
-    print('Attention weights are:')
-    print(temp_attn)
-    print('Output is:')
-    print(temp_out)
-
-
 # In[17]:
 
 
@@ -280,12 +265,22 @@ class MultiHeadAttention(tf.keras.layers.Layer):
         x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
         return tf.transpose(x, perm=[0, 2, 1, 3])
 
-    def call(self, v, k, q, mask):
+    def call(self, v, k, q, mask,cache = None):
         batch_size = tf.shape(q)[0]
 
         q = self.wq(q)  # (batch_size, seq_len, d_model)
         k = self.wk(k)  # (batch_size, seq_len, d_model)
         v = self.wv(v)  # (batch_size, seq_len, d_model)
+        if cache is not None:
+            if cache.get('k') == None:
+                cache['k'] = k
+                cache['v'] = v
+            else:
+#                 k = tf.concat([cache['k'], k], axis=-1)
+#                 v = tf.concat([cache['v'], v], axis=-1)
+            
+                cache['k'] = k
+                cache['v'] = v
 
         q = self.split_heads(
             q, batch_size)  # (batch_size, num_heads, seq_len_q, depth)
@@ -313,7 +308,7 @@ class MultiHeadAttention(tf.keras.layers.Layer):
         return output, attention_weights
 
 
-# In[18]:
+# In[16]:
 
 
 def point_wise_feed_forward_network(d_model, dff):
@@ -324,7 +319,7 @@ def point_wise_feed_forward_network(d_model, dff):
     ])
 
 
-# In[19]:
+# In[20]:
 
 
 class EncoderLayer(tf.keras.layers.Layer):
@@ -356,7 +351,7 @@ class EncoderLayer(tf.keras.layers.Layer):
         return out2
 
 
-# In[20]:
+# In[19]:
 
 
 class DecoderLayer(tf.keras.layers.Layer):
@@ -376,11 +371,11 @@ class DecoderLayer(tf.keras.layers.Layer):
         self.dropout2 = tf.keras.layers.Dropout(rate)
         self.dropout3 = tf.keras.layers.Dropout(rate)
 
-    def call(self, x, enc_output, training, look_ahead_mask, padding_mask):
+    def call(self, x, enc_output, training, look_ahead_mask, padding_mask,cache = None):
         # enc_output.shape == (batch_size, input_seq_len, d_model)
 
         attn1, attn_weights_block1 = self.mha1(
-            x, x, x, look_ahead_mask)  # (batch_size, target_seq_len, d_model)
+            x, x, x, look_ahead_mask,cache = cache)  # (batch_size, target_seq_len, d_model)
         attn1 = self.dropout1(attn1, training=training)
         out1 = self.layernorm1(attn1 + x)
 
@@ -399,7 +394,7 @@ class DecoderLayer(tf.keras.layers.Layer):
         return out3, attn_weights_block1, attn_weights_block2
 
 
-# In[21]:
+# In[18]:
 
 
 class Encoder(tf.keras.layers.Layer):
@@ -471,20 +466,26 @@ class Decoder(tf.keras.layers.Layer):
         ]
         self.dropout = tf.keras.layers.Dropout(rate)
 
-    def call(self, x, enc_output, training, look_ahead_mask, padding_mask):
+    def call(self, x, enc_output, training, look_ahead_mask, padding_mask,cache = None):
 
         seq_len = tf.shape(x)[1]
         attention_weights = {}
         x = self.embedding(x)  # (batch_size, target_seq_len, d_model)
         x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
         x += self.pos_encoding[:, :seq_len, :]
-
         x = self.dropout(x, training=training)
 
         for i in range(self.num_layers):
+            if cache is not None:
+                layer_name = 'layers_%s'%i
+                cache[layer_name] = {}
+                layer_cache = cache[layer_name] 
+            else:
+                layer_cache = None
             x, block1, block2 = self.dec_layers[i](x, enc_output, training,
                                                    look_ahead_mask,
-                                                   padding_mask)
+                                                   padding_mask,
+                                                  cache = layer_cache)
 
             attention_weights['decoder_layer{}_block1'.format(i + 1)] = block1
             attention_weights['decoder_layer{}_block2'.format(i + 1)] = block2
@@ -493,7 +494,7 @@ class Decoder(tf.keras.layers.Layer):
         return x, attention_weights
 
 
-# In[23]:
+# In[21]:
 
 
 class Transformer(tf.keras.Model):
@@ -533,9 +534,73 @@ class Transformer(tf.keras.Model):
             dec_output)  # (batch_size, tar_seq_len, target_vocab_size)
 
         return final_output, attention_weights
+    
+    def predict(self,x):
+        start_token = [tokenizer_en_vocab_size]
+        end_token = [tokenizer_en_vocab_size + 1]
+        
+        # 输入语句是葡萄牙语，
+        #增加开始和结束标记
+        x = start_token + tokenizer_en.encode(x) + end_token
+        encoder_input = tf.expand_dims(x, 0)
+
+        # 因为目标是英语，输入 transformer 的第一个词应该是
+        # 英语的开始标记。
+        decoder_input = [tokenizer_zh_vocab_size]
+        output = tf.expand_dims(decoder_input, 0)
+        
+        enc_output = None
+        predicted_id = output
+        global cache
+        cache = {}
+        for i in range(MAX_LENGTH):
+            if i==0:
+                enc_padding_mask, combined_mask, dec_padding_mask = create_masks(
+                encoder_input, output)
+
+            look_ahead_mask = create_look_ahead_mask(tf.shape(output)[1])
+            dec_target_padding_mask = create_padding_mask(output)
+            combined_mask = tf.maximum(dec_target_padding_mask, look_ahead_mask)
+                
+            if enc_output == None:
+                enc_output = self.encoder(
+                encoder_input, False,
+                enc_padding_mask)
+                
+            dec_output, attention_weights = self.decoder(output,
+                                                     enc_output,
+                                                     False,
+                                                     combined_mask,
+                                                     dec_padding_mask,
+                                                    cache = None)
+
+            predictions = self.final_layer(
+                dec_output)  # (batch_size, tar_seq_len, target_vocab_size)
+#             print(cache)
+            # 从 seq_len 维度选择最后一个词
+            predictions = predictions[:, -1:, :]  # (batch_size, 1, vocab_size)
+
+            predicted_id = tf.cast(tf.argmax(predictions, axis=-1), tf.int32)
+    #         print(cache)
+            # 如果 predicted_id 等于结束标记，就返回结果
+            if predicted_id == tokenizer_zh.vocab_size + 1:
+                break
+            # 连接 predicted_id 与输出，作为解码器的输入传递到解码器。
+            output = tf.concat([output, predicted_id], axis=-1)
+            result = output
+            
+            
+        result = tf.squeeze(result, axis=0)
+        predicted_sentence = tokenizer_zh.decode(
+        [i for i in result if i < tokenizer_zh.vocab_size])
+        
+        return predicted_sentence
+    
+    def fit(self):
+        pass
 
 
-# In[24]:
+# In[23]:
 
 
 class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
@@ -554,7 +619,7 @@ class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
         return tf.math.rsqrt(self.d_model) * tf.math.minimum(arg1, arg2)
 
 
-# In[25]:
+# In[27]:
 
 
 def loss_function(real, pred):
@@ -567,7 +632,7 @@ def loss_function(real, pred):
     return tf.reduce_mean(loss_)
 
 
-# In[26]:
+# In[24]:
 
 
 def create_masks(inp, tar):
@@ -587,10 +652,10 @@ def create_masks(inp, tar):
     return enc_padding_mask, combined_mask, dec_padding_mask
 
 
-# In[27]:
+# In[25]:
 
 
-def create_ckpt(checkpoint_path = "./checkpoints/train1"):
+def create_ckpt(checkpoint_path = "./checkpoints/13_100_light"):
     
 
     ckpt = tf.train.Checkpoint(transformer=transformer, optimizer=optimizer)
@@ -604,7 +669,7 @@ def create_ckpt(checkpoint_path = "./checkpoints/train1"):
     return ckpt,ckpt_manager
 
 
-# In[28]:
+# In[26]:
 
 
 # 该 @tf.function 将追踪-编译 train_step 到 TF 图中，以便更快地
@@ -637,7 +702,7 @@ def train_step(inp, tar):
     train_accuracy(tar_real, predictions)
 
 
-# In[29]:
+# In[28]:
 
 
 from datetime import datetime
@@ -655,246 +720,88 @@ def log(*args,fn:str=''):
     print(sentence)
 
 
-# In[30]:
+# In[29]:
 
 
-# from threading import Thread
-# import queue
-def main(EPOCHS=20):
-#     dataqueue = queue.Queue(10)
-#     flag = True
-#     def train():
-#         while flag:
-#             batch,inp,tar = dataqueue.get()
-#             train_step(inp, tar)
+class Translator():
+    def __init__(self,train_size = 0,val_size = 0,ckpt_path = 'checkpoints/13_100_light',
+                vocab_path = 'vocab/13_100_light'):
+        global train_examples, val_examples
+        global train_dataset, val_dataset
+        global tokenizer_en, tokenizer_zh
+        global ckpt, ckpt_manager
+        examples = load_data_file()
+        train_examples,val_examples = train_val(examples,train_size,val_size)
+        train_dataset, val_dataset = creat_datasets(train_examples=examples,
+                                                    val_examples=val_examples,
+                                                 train_size=train_size)
+
+        tokenizer_en, tokenizer_zh = load_tokenizer(vocab_path)
+
+        # 超参数（hyperparameters） 为了让本示例小且相对较快，已经减小了num_layers、 d_model 和 dff 的值。
+        # Transformer 的基础模型使用的数值为：
+        #    num_layers=6，d_model = 512，dff = 2048。
+        #     num_layers = 6
+        #     d_model = 512
+        #     dff = 2048
+        #     num_heads = 8
+
+        num_layers = 4
+        d_model = 128
+        dff = 512
+        num_heads = 8
         
-    for epoch in range(EPOCHS):
-        start = time.time()
-        train_loss.reset_states()
-        train_accuracy.reset_states()
-#         with tf.device('/cpu:0'):
-#             cpu_process = Thread(target=train)
-#             cpu_process.daemon = True
-#             cpu_process.start()
-#         with tf.device('/gpu:0'):
-#             gpu_process = Thread(target=train)
-#             gpu_process.daemon=True
-#             gpu_process.start()
-#         inp -> portuguese, tar -> zhongwen
-        for (batch, (inp, tar)) in enumerate(train_dataset):
-#             dataqueue.put((batch,inp,tar))
-            train_step(inp, tar)
-            if batch % 50 == 0:
-                log('Epoch {} Batch {} Loss {:.4f} Accuracy {:.4f}'.format(
-                    epoch + 1, batch, train_loss.result(),
-                    train_accuracy.result()))
+        global tokenizer_en_vocab_size,tokenizer_zh_vocab_size
+    
+        tokenizer_en_vocab_size = tokenizer_en.vocab_size
+        tokenizer_zh_vocab_size = tokenizer_zh.vocab_size
+        input_vocab_size = tokenizer_en_vocab_size + 2
+        target_vocab_size = tokenizer_zh_vocab_size + 2
 
-        if (epoch + 1) % 1 == 0:
-            ckpt_save_path = ckpt_manager.save()
-            log('Saving checkpoint for epoch {} at {}'.format(
-                epoch + 1, ckpt_save_path))
+        self.transformer = Transformer(num_layers,
+                                  d_model,
+                                  num_heads,
+                                  dff,
+                                  input_vocab_size,
+                                  target_vocab_size,
+                                  pe_input=input_vocab_size,
+                                  pe_target=target_vocab_size,
+                                      )
+        ckpt = tf.train.Checkpoint(transformer=self.transformer)
 
-        log('Epoch {} Loss {:.4f} Accuracy {:.4f}'.format(
-            epoch + 1, train_loss.result(), train_accuracy.result()))
+        ckpt_manager = tf.train.CheckpointManager(ckpt, ckpt_path, max_to_keep=5)
 
-        log('Time taken for 1 epoch: {} secs\n'.format(time.time() - start))
+        # 如果检查点存在，则恢复最新的检查点。
+        if ckpt_manager.latest_checkpoint:
+            ckpt.restore(ckpt_manager.latest_checkpoint).expect_partial()
+            log('Latest checkpoint restored!!')
+
+        
+    def translate(self,inp_sentence):
+        return self.transformer.predict(inp_sentence)
 
 
 # In[31]:
 
 
-def save_ckpt():
-    ckpt_save_path = ckpt_manager.save()
-    log('Saving checkpoint  at {}'.format(ckpt_save_path))
+# t = None
+# t = Translator()
 
 
-# In[32]:
+# In[30]:
 
 
-def initial(train_size=0,
-            val_size=0,
-            checkpoint_path="./checkpoints/train1",
-           vocabpath='/train1'):
-    global train_examples, val_examples
-    global train_dataset, val_dataset
-    global transformer, tokenizer_en, tokenizer_zh
-    global optimizer, loss_object, train_loss, train_accuracy
-    global ckpt, ckpt_manager
-    examples = load_data_file()
-    train_examples,val_examples = train_val(examples,train_size,val_size)
-    train_dataset, val_dataset = creat_datasets(train_examples=examples,
-                                                val_examples=val_examples,
-                                             train_size=train_size)
-
-    tokenizer_en, tokenizer_zh = load_tokenizer(vocabpath)
-
-    # 超参数（hyperparameters） 为了让本示例小且相对较快，已经减小了num_layers、 d_model 和 dff 的值。
-    # Transformer 的基础模型使用的数值为：
-    #    num_layers=6，d_model = 512，dff = 2048。
-    #     num_layers = 6
-    #     d_model = 512
-    #     dff = 2048
-    #     num_heads = 8
-
-    num_layers = 4
-    d_model = 128
-    dff = 512
-    num_heads = 8
-
-    input_vocab_size = tokenizer_en.vocab_size + 2
-    target_vocab_size = tokenizer_zh.vocab_size + 2
-    dropout_rate = 0.1
-
-    learning_rate = CustomSchedule(d_model)
-    
-    optimizer = tf.keras.optimizers.Adam(learning_rate,
-                                         beta_1=0.9,
-                                         beta_2=0.98,
-                                         epsilon=1e-9)
-    loss_object = tf.keras.losses.SparseCategoricalCrossentropy(
-        from_logits=True, reduction='none')
-
-    train_loss = tf.keras.metrics.Mean(name='train_loss')
-    train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(
-        name='train_accuracy')
-    transformer = Transformer(num_layers,
-                              d_model,
-                              num_heads,
-                              dff,
-                              input_vocab_size,
-                              target_vocab_size,
-                              pe_input=input_vocab_size,
-                              pe_target=target_vocab_size,
-                              rate=dropout_rate)
-    ckpt, ckpt_manager = create_ckpt(checkpoint_path)
+# %timeit t.translate("""3. The existence of support services for women who are the victims of aggression or abuses;3. The existence of support services for women who are the victims of aggression or abuses;3. The existence of support services for women who are the victims of aggression or abuses;""")
 
 
 # In[33]:
 
 
-def evaluate(inp_sentence):
-    start_token = [tokenizer_en.vocab_size]
-    end_token = [tokenizer_en.vocab_size + 1]
-    # 输入语句是葡萄牙语，
-    #增加开始和结束标记
-    inp_sentence = start_token + tokenizer_en.encode(inp_sentence) + end_token
-    encoder_input = tf.expand_dims(inp_sentence, 0)
-    # 因为目标是英语，输入 transformer 的第一个词应该是
-    # 英语的开始标记。
-    decoder_input = [tokenizer_zh.vocab_size]
-    output = tf.expand_dims(decoder_input, 0)
-    
-    for i in range(MAX_LENGTH):
-        enc_padding_mask, combined_mask, dec_padding_mask = create_masks(
-            encoder_input, output)
-        # predictions.shape == (batch_size, seq_len, vocab_size)
-        #         with tf.device('gpu'):
-
-        predictions, attention_weights = transformer(encoder_input, output,
-                                                     False, enc_padding_mask,
-                                                     combined_mask,
-                                                     dec_padding_mask)
-        # 从 seq_len 维度选择最后一个词
-        predictions = predictions[:, -1:, :]  # (batch_size, 1, vocab_size)
-
-        predicted_id = tf.cast(tf.argmax(predictions, axis=-1), tf.int32)
-
-        # 如果 predicted_id 等于结束标记，就返回结果
-        if predicted_id == tokenizer_zh.vocab_size + 1:
-            return tf.squeeze(output, axis=0), attention_weights
-
-        # 连接 predicted_id 与输出，作为解码器的输入传递到解码器。
-        output = tf.concat([output, predicted_id], axis=-1)
-
-    return tf.squeeze(output, axis=0), attention_weights
+# %timeit t.translate('i will love you forever!')
 
 
-# In[34]:
-
-
-def plot_attention_weights(attention, sentence, result, layer):
-    fig = plt.figure(figsize=(16, 8))
-
-    sentence = tokenizer_en.encode(sentence)
-
-    attention = tf.squeeze(attention[layer], axis=0)
-
-    for head in range(attention.shape[0]):
-        ax = fig.add_subplot(2, 4, head + 1)
-
-        # 画出注意力权重
-        ax.matshow(attention[head][:-1, :], cmap='viridis')
-
-        fontdict = {'fontsize': 10}
-
-        ax.set_xticks(range(len(sentence) + 2))
-        ax.set_yticks(range(len(result)))
-
-        ax.set_ylim(len(result) - 1.5, -0.5)
-
-        ax.set_xticklabels(['<start>'] +
-                           [tokenizer_en.decode([i])
-                            for i in sentence] + ['<end>'],
-                           fontdict=fontdict,
-                           rotation=90)
-
-        ax.set_yticklabels([
-            tokenizer_en.decode([i])
-            for i in result if i < tokenizer_en.vocab_size
-        ],
-                           fontdict=fontdict)
-
-        ax.set_xlabel('Head {}'.format(head + 1))
-
-    plt.tight_layout()
-    plt.show()
-
-
-# In[35]:
-
-
-def translate(sentence, plot=''):
-    result, attention_weights = evaluate(sentence)
-
-    predicted_sentence = tokenizer_zh.decode(
-        [i for i in result if i < tokenizer_zh.vocab_size])
-#     predicted_sentence = predicted_sentence.split('。')[0]
-    print('Input: {}'.format(sentence))
-    print('Predicted translation: {}'.format(predicted_sentence))
-    if plot:
-        plot_attention_weights(attention_weights, sentence, result, plot)
-    return predicted_sentence
-        
-
-
-# In[36]:
-
-
-class Test():
-    def __init__(self):
-        it=val_examples.as_numpy_iterator()
-        self.it = iter(it.__iter__())
-    
-    def test(self):
-        it = self.it.next()
-        inp = it[0].decode()
-        real = it[1].decode()
-        print('input:',inp)
-        print('correct:',real)
-        print()
-        translate(inp)
-
-
-# In[37]:
+# In[ ]:
 
 
 
-if __name__ == '__main__':
-    initial(10000000,40000,'checkpoints/13_100_light/','/13_100_light')
-#     with tf.device('/cpu:0'):
-#     main()
-    t =Test()
-    t.test()
-#     s = 'This kind of two-stream deep learning architectures have been proved effective for short-term tem poral cubes capturing in different sequence tasks, and lay the structural foundation for the later video based human action Tecognition [10].'
-#     print(translate(s))
 
